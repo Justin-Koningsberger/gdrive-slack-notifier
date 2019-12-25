@@ -11,6 +11,11 @@ require "fileutils"
 require 'aws-sdk-s3'
 require 'net/http'
 
+FOLDER_NAME = ENV["FOLDER_NAME"].freeze
+BUCKET_NAME = ENV["BUCKET_NAME"].freeze
+SLACK_WEBHOOK = ENV["SLACK_WEBHOOK"].freeze
+CHANNEL = ENV["SLACK_CHANNEL"].freeze
+
 OOB_URI = "urn:ietf:wg:oauth:2.0:oob".freeze
 APPLICATION_NAME = "test-drive-api".freeze
 CREDENTIALS_PATH = "credentials/credentials.json".freeze
@@ -45,9 +50,9 @@ def authorize
 end
 
 def send_slack_notification(file_name, file_id)
-  slack_text = "new voicememo uploaded, name: #{file_name}, id: #{file_id}"
-  uri = URI('https://hooks.slack.com/services/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')
-  params = {text: slack_text, channel: "#voicememos-test", username: "SessionBot"}
+  slack_text = "new file uploaded, name: #{file_name}, id: #{file_id}"
+  uri = URI(SLACK_WEBHOOK)
+  params = {text: slack_text, channel: CHANNEL, username: "Notifier bot"}
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = true
   request = Net::HTTP::Post.new(uri)
@@ -56,38 +61,41 @@ def send_slack_notification(file_name, file_id)
   response = http.request(request)
 end
 
-drive_service = Google::Apis::DriveV3::DriveService.new
-drive_service.client_options.application_name = APPLICATION_NAME
-drive_service.authorization = authorize
-folder_name = 'voicememos'
+def get_drive_files(foldername)
+  drive_service = Google::Apis::DriveV3::DriveService.new
+  drive_service.client_options.application_name = APPLICATION_NAME
+  drive_service.authorization = authorize
+  folder_name = foldername
 
-folder = drive_service.list_files(q: "mimeType='application/vnd.google-apps.folder' and name='#{folder_name}'", spaces: 'drive')
-folder_id = nil
-folder.files.map { |file| folder_id = file.id  }
+  folder = drive_service.list_files(q: "mimeType='application/vnd.google-apps.folder' and name='#{folder_name}'", spaces: 'drive')
+  folder_id = nil
+  folder.files.map { |file| folder_id = file.id  }
 
-voicememos = drive_service.list_files(q: "'#{folder_id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false", fields: "files(id, name, created_time)").files
+  files = drive_service.list_files(q: "'#{folder_id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false", fields: "files(id, name, created_time)").files
 
-# limit voicememos to newest 50  
-voicememos.sort{ |memo| memo.created_time}
-voicememos = voicememos.take(50)
+  # limit files to newest 50  
+  files.sort{ |file| file.created_time}
+  files.take(50)
+end
 
+files = get_drive_files(FOLDER_NAME)
 s3 = Aws::S3::Client.new
 resp = s3.list_objects_v2({
-  bucket: "voicememo-notifications", 
+  bucket: BUCKET_NAME, 
   max_keys: 50, 
 })
 # pp resp.to_h
 ids = resp.contents.map { |object| object.key }
 puts '----------------------------------------------------'
 
-voicememos.map do |file| 
+files.map do |file| 
   name = file.name
   id = file.id
   # puts "name: #{name} - created at: #{file.created_time} - id: #{id}"
   # TODO check what errors s3.put_object throws
   if (!ids.include?(id))
     resp = s3.put_object({
-      bucket: "voicememo-notifications", 
+      bucket: BUCKET_NAME, 
       key: id.to_s, 
       server_side_encryption: "AES256", 
       storage_class: "STANDARD_IA", 
@@ -95,4 +103,3 @@ voicememos.map do |file|
     send_slack_notification(name, id)
   end
 end
-
